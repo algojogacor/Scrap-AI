@@ -1,2 +1,2 @@
 flask
-g4f[all]
+g4f
