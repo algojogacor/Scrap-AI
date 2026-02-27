@@ -1,38 +1,38 @@
 from flask import Flask, request, jsonify
-import g4f
+from g4f.client import Client
 import os
 
 app = Flask(__name__)
+client = Client()
 
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.json
     system = data.get('system', '')
     messages = data.get('messages', [])
-    
+
     full_messages = []
     if system:
         full_messages.append({"role": "system", "content": system})
     full_messages.extend(messages)
-    
+
     try:
-        # Coba GPT-4o dulu, fallback ke Gemini
-        response = g4f.ChatCompletion.create(
-            model=g4f.models.gpt_4o,
+        # Coba GPT-4o dulu
+        response = client.chat.completions.create(
+            model="gpt-4o",
             messages=full_messages,
-            provider=g4f.Provider.PollinationsAI,
         )
-        return jsonify({"reply": response, "model": "gpt-4o"})
+        return jsonify({"reply": response.choices[0].message.content, "model": "gpt-4o"})
     except Exception as e1:
         try:
-            response = g4f.ChatCompletion.create(
-                model="gemini-1.5-pro",
+            # Fallback ke GPT-4
+            response = client.chat.completions.create(
+                model="gpt-4",
                 messages=full_messages,
-                provider=g4f.Provider.Gemini,
             )
-            return jsonify({"reply": response, "model": "gemini-pro"})
+            return jsonify({"reply": response.choices[0].message.content, "model": "gpt-4"})
         except Exception as e2:
-            return jsonify({"error": str(e2)}), 500
+            return jsonify({"error": f"GPT-4o: {str(e1)} | GPT-4: {str(e2)}"}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
