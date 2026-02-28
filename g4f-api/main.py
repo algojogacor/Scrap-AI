@@ -1,14 +1,9 @@
 from flask import Flask, request, jsonify
 import asyncio
+import threading
 import os
 import logging
 import sys
-
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-except ImportError:
-    pass
 
 app = Flask(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -19,6 +14,22 @@ CAI_CHAR_ID = os.environ.get("CAI_CHAR_ID", "")
 _client  = None
 _chat_id = None
 
+# ── Satu event loop permanen, jalan di thread terpisah ──
+_loop = asyncio.new_event_loop()
+
+def _start_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+_loop_thread = threading.Thread(target=_start_loop, args=(_loop,), daemon=True)
+_loop_thread.start()
+
+def run_async(coro):
+    """Jalankan coroutine di event loop permanen, tunggu hasilnya."""
+    future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    return future.result(timeout=30)
+
+# ── C.AI helpers ──
 async def get_client():
     global _client
     if _client is None:
@@ -44,18 +55,10 @@ async def send_message_async(user_message):
     answer  = await client.chat.send_message(CAI_CHAR_ID, chat_id, user_message)
     return answer.get_primary_candidate().text
 
-# FIX: pakai factory function (lambda), bukan coroutine langsung
-def run_async(coro_fn):
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(lambda: asyncio.run(coro_fn()))
-                return future.result()
-        return loop.run_until_complete(coro_fn())
-    except Exception:
-        return asyncio.run(coro_fn())
+async def reset_async():
+    global _client, _chat_id
+    _client  = None
+    _chat_id = None
 
 def is_valid_reply(text):
     if not text or len(text.strip()) < 2:
@@ -82,25 +85,27 @@ def chat():
         return jsonify({"error": "Tidak ada pesan user"}), 400
 
     try:
-        # FIX: lambda agar coroutine dibuat fresh tiap request
-        reply = run_async(lambda: send_message_async(last_user_msg))
+        reply = run_async(send_message_async(last_user_msg))
         if is_valid_reply(reply):
             print(f"✅ C.AI reply: {reply[:60]}", flush=True)
             return jsonify({"reply": reply, "provider": "CharacterAI"})
         return jsonify({"error": "Reply tidak valid"}), 500
     except Exception as e:
         print(f"❌ C.AI error: {e}", flush=True)
-        global _client, _chat_id
-        _client  = None
-        _chat_id = None
+        # Reset session kalau error
+        try:
+            run_async(reset_async())
+        except Exception:
+            pass
         return jsonify({"error": str(e)}), 500
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    global _client, _chat_id
-    _client  = None
-    _chat_id = None
-    return jsonify({"status": "session reset"})
+    try:
+        run_async(reset_async())
+        return jsonify({"status": "session reset"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
