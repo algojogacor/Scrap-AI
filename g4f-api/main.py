@@ -7,13 +7,14 @@ import sys
 app = Flask(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-# Urutan dari yang terbaik untuk Bahasa Indonesia
+# Provider yang proven jalan — tanpa DeepInfra, You, PollinationsAI
 PROVIDERS_CONFIG = [
-    # (provider_name, model) — DeepInfra paling bagus, support system prompt
-    ("DeepInfra",      "meta-llama/Meta-Llama-3.1-70B-Instruct"),
-    ("You",            g4f.models.default),
-    ("TeachAnything",  g4f.models.default),
-    ("PollinationsAI", "openai"),  # last resort, sering ngelantur
+    ("Blackbox",      g4f.models.default),
+    ("TeachAnything", g4f.models.default),
+    ("Free2GPT",      g4f.models.default),
+    ("Pizzagpt",      g4f.models.default),
+    ("ChatGptEs",     g4f.models.default),
+    ("Airforce",      g4f.models.default),
 ]
 
 def get_providers():
@@ -30,7 +31,6 @@ PROVIDERS = get_providers()
 def build_messages(system, messages):
     result = []
     if system:
-        # Dual inject — system role + conversation history
         result.append({"role": "system", "content": system})
         result.append({
             "role": "user",
@@ -40,14 +40,12 @@ def build_messages(system, messages):
     result.extend(messages)
     return result
 
-def is_valid_reply(text, system):
+def is_valid_reply(text):
     if not text or len(text.strip()) < 2:
         return False
-    # Pastikan tidak balas ulang instruksi sistem
-    if text.strip().lower() in ["oke siap", "ok siap", "siap"]:
+    if text.strip().lower() in ["oke siap", "ok siap", "siap", "sure", "okay"]:
         return False
-    # Deteksi gibberish Indo
-    gibberish = ["lauk", "nampol", "nyamu", "tetap lauk"]
+    gibberish = ["lauk", "nampol", "nyamu", "tetap lauk", "i'm here to help", "how can i assist"]
     if any(w in text.lower() for w in gibberish):
         return False
     return True
@@ -68,8 +66,8 @@ def chat():
                 provider=provider,
             )
             reply = str(response).strip()
-            if is_valid_reply(reply, system):
-                print(f"✅ {name} berhasil: {reply[:60]}...", flush=True)
+            if is_valid_reply(reply):
+                print(f"✅ {name} berhasil: {reply[:60]}", flush=True)
                 return jsonify({"reply": reply, "provider": name})
             print(f"⚠️  {name} tidak valid: '{reply[:40]}'", flush=True)
         except Exception as e:
