@@ -1,87 +1,116 @@
 from flask import Flask, request, jsonify
-import g4f
+import asyncio
 import os
 import logging
 import sys
 
+# Support nested event loops (Flask + asyncio)
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+
 app = Flask(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-# Provider yang proven jalan — tanpa DeepInfra, You, PollinationsAI
-PROVIDERS_CONFIG = [
-    ("Blackbox",      g4f.models.default),
-    ("TeachAnything", g4f.models.default),
-    ("Free2GPT",      g4f.models.default),
-    ("Pizzagpt",      g4f.models.default),
-    ("ChatGptEs",     g4f.models.default),
-    ("Airforce",      g4f.models.default),
-]
+CAI_TOKEN       = os.environ.get("CAI_TOKEN", "")
+CAI_CHAR_ID     = os.environ.get("CAI_CHAR_ID", "")
 
-def get_providers():
-    available = []
-    for name, model in PROVIDERS_CONFIG:
-        provider = getattr(g4f.Provider, name, None)
-        if provider:
-            available.append((provider, name, model))
-    print(f"✅ Provider siap: {[n for _, n, _ in available]}", flush=True)
-    return available
+# ── Cache client & chat_id supaya tidak buat session baru tiap request ──
+_client   = None
+_chat_id  = None
 
-PROVIDERS = get_providers()
+async def get_client():
+    global _client
+    if _client is None:
+        from PyCharacterAI import get_client as cai_get_client
+        _client = await cai_get_client(token=CAI_TOKEN)
+        me = await _client.account.fetch_me()
+        print(f"✅ C.AI login sebagai @{me.username}", flush=True)
+    return _client
 
-def build_messages(system, messages):
-    result = []
-    if system:
-        result.append({"role": "system", "content": system})
-        result.append({
-            "role": "user",
-            "content": f"Kamu berperan sebagai karakter ini dan WAJIB ikuti semua instruksinya:\n\n{system}\n\nBalas 'oke siap'."
-        })
-        result.append({"role": "assistant", "content": "oke siap"})
-    result.extend(messages)
-    return result
+async def get_or_create_chat():
+    global _chat_id
+    client = await get_client()
+    if _chat_id is None:
+        chat, greeting = await client.chat.create_chat(CAI_CHAR_ID)
+        _chat_id = chat.chat_id
+        print(f"✅ Chat baru dibuat: {_chat_id}", flush=True)
+        print(f"   Greeting: {greeting.get_primary_candidate().text[:60]}", flush=True)
+    return _chat_id
+
+async def send_message_async(user_message):
+    client   = await get_client()
+    chat_id  = await get_or_create_chat()
+    answer   = await client.chat.send_message(CAI_CHAR_ID, chat_id, user_message)
+    return answer.get_primary_candidate().text
+
+def run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
+        return loop.run_until_complete(coro)
+    except Exception:
+        return asyncio.run(coro)
 
 def is_valid_reply(text):
     if not text or len(text.strip()) < 2:
         return False
-    if text.strip().lower() in ["oke siap", "ok siap", "siap", "sure", "okay"]:
-        return False
-    gibberish = ["lauk", "nampol", "nyamu", "tetap lauk", "i'm here to help", "how can i assist"]
-    if any(w in text.lower() for w in gibberish):
+    if text.strip().lower() in ["oke siap", "ok siap", "siap"]:
         return False
     return True
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    data = request.json
-    system   = data.get('system', '')
+    if not CAI_TOKEN or not CAI_CHAR_ID:
+        return jsonify({"error": "CAI_TOKEN atau CAI_CHAR_ID belum diset"}), 500
+
+    data     = request.json
     messages = data.get('messages', [])
-    full_messages = build_messages(system, messages)
 
-    last_error = None
-    for provider, name, model in PROVIDERS:
-        try:
-            response = g4f.ChatCompletion.create(
-                model=model,
-                messages=full_messages,
-                provider=provider,
-            )
-            reply = str(response).strip()
-            if is_valid_reply(reply):
-                print(f"✅ {name} berhasil: {reply[:60]}", flush=True)
-                return jsonify({"reply": reply, "provider": name})
-            print(f"⚠️  {name} tidak valid: '{reply[:40]}'", flush=True)
-        except Exception as e:
-            last_error = str(e)
-            print(f"⚠️  {name} gagal: {e}", flush=True)
-            continue
+    # Ambil pesan user terakhir saja — C.AI maintain history sendiri
+    last_user_msg = ""
+    for m in reversed(messages):
+        if m.get('role') == 'user':
+            last_user_msg = m.get('content', '')
+            break
 
-    return jsonify({"error": last_error or "semua provider gagal"}), 500
+    if not last_user_msg:
+        return jsonify({"error": "Tidak ada pesan user"}), 400
+
+    try:
+        reply = run_async(send_message_async(last_user_msg))
+        if is_valid_reply(reply):
+            print(f"✅ C.AI reply: {reply[:60]}", flush=True)
+            return jsonify({"reply": reply, "provider": "CharacterAI"})
+        return jsonify({"error": "Reply tidak valid"}), 500
+    except Exception as e:
+        print(f"❌ C.AI error: {e}", flush=True)
+        # Reset chat kalau session expired
+        global _client, _chat_id
+        _client  = None
+        _chat_id = None
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/reset', methods=['POST'])
+def reset():
+    global _client, _chat_id
+    _client  = None
+    _chat_id = None
+    return jsonify({"status": "session reset"})
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         "status": "ok",
-        "providers": [n for _, n, _ in PROVIDERS]
+        "mode": "CharacterAI",
+        "char_id": CAI_CHAR_ID,
+        "token_set": bool(CAI_TOKEN),
     })
 
 if __name__ == '__main__':
