@@ -4,7 +4,6 @@ import os
 import logging
 import sys
 
-# Support nested event loops (Flask + asyncio)
 try:
     import nest_asyncio
     nest_asyncio.apply()
@@ -14,12 +13,11 @@ except ImportError:
 app = Flask(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-CAI_TOKEN       = os.environ.get("CAI_TOKEN", "")
-CAI_CHAR_ID     = os.environ.get("CAI_CHAR_ID", "")
+CAI_TOKEN   = os.environ.get("CAI_TOKEN", "")
+CAI_CHAR_ID = os.environ.get("CAI_CHAR_ID", "")
 
-# ── Cache client & chat_id supaya tidak buat session baru tiap request ──
-_client   = None
-_chat_id  = None
+_client  = None
+_chat_id = None
 
 async def get_client():
     global _client
@@ -41,22 +39,23 @@ async def get_or_create_chat():
     return _chat_id
 
 async def send_message_async(user_message):
-    client   = await get_client()
-    chat_id  = await get_or_create_chat()
-    answer   = await client.chat.send_message(CAI_CHAR_ID, chat_id, user_message)
+    client  = await get_client()
+    chat_id = await get_or_create_chat()
+    answer  = await client.chat.send_message(CAI_CHAR_ID, chat_id, user_message)
     return answer.get_primary_candidate().text
 
-def run_async(coro):
+# FIX: pakai factory function (lambda), bukan coroutine langsung
+def run_async(coro_fn):
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
+                future = pool.submit(lambda: asyncio.run(coro_fn()))
                 return future.result()
-        return loop.run_until_complete(coro)
+        return loop.run_until_complete(coro_fn())
     except Exception:
-        return asyncio.run(coro)
+        return asyncio.run(coro_fn())
 
 def is_valid_reply(text):
     if not text or len(text.strip()) < 2:
@@ -73,7 +72,6 @@ def chat():
     data     = request.json
     messages = data.get('messages', [])
 
-    # Ambil pesan user terakhir saja — C.AI maintain history sendiri
     last_user_msg = ""
     for m in reversed(messages):
         if m.get('role') == 'user':
@@ -84,14 +82,14 @@ def chat():
         return jsonify({"error": "Tidak ada pesan user"}), 400
 
     try:
-        reply = run_async(send_message_async(last_user_msg))
+        # FIX: lambda agar coroutine dibuat fresh tiap request
+        reply = run_async(lambda: send_message_async(last_user_msg))
         if is_valid_reply(reply):
             print(f"✅ C.AI reply: {reply[:60]}", flush=True)
             return jsonify({"reply": reply, "provider": "CharacterAI"})
         return jsonify({"error": "Reply tidak valid"}), 500
     except Exception as e:
         print(f"❌ C.AI error: {e}", flush=True)
-        # Reset chat kalau session expired
         global _client, _chat_id
         _client  = None
         _chat_id = None
