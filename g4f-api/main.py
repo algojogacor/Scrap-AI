@@ -5,69 +5,68 @@ import logging
 import sys
 
 app = Flask(__name__)
-
-# Redirect access log ke stdout biar Railway tidak salah baca sebagai error
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-PROVIDERS_TO_TRY = [
-    (g4f.Provider.Liaobots,    "gpt-4o"),
-    (g4f.Provider.Blackbox,    "blackbox"),
-    (g4f.Provider.DeepInfra,   "meta-llama/Meta-Llama-3.1-70B-Instruct"),
-    (g4f.Provider.Airforce,    "gpt-4o-mini"),
-]
+# Cek provider yang tersedia di versi ini
+def get_providers():
+    provider_names = [
+        "Blackbox", "DeepInfra", "Airforce", "PollinationsAI",
+        "Free2GPT", "DDG", "You", "Pizzagpt", "ChatGptEs",
+        "PerplexityLabs", "TeachAnything", "ReplicateHome",
+    ]
+    available = []
+    for name in provider_names:
+        provider = getattr(g4f.Provider, name, None)
+        if provider:
+            available.append((provider, name))
+    print(f"✅ Provider tersedia: {[n for _, n in available]}", flush=True)
+    return available
+
+PROVIDERS = get_providers()
 
 def build_messages(system, messages):
-    """
-    Inject persona sebagai pseudo-conversation di awal
-    supaya provider yang tidak support system role tetap baca persona.
-    """
     result = []
-
     if system:
-        # Cara 1: system role (untuk provider yang support)
         result.append({"role": "system", "content": system})
-        # Cara 2: inject ulang sebagai user+assistant exchange (fallback)
         result.append({
             "role": "user",
-            "content": f"Untuk percakapan ini, kamu berperan sebagai karakter berikut dan WAJIB mengikuti semua instruksinya:\n\n{system}\n\nBalas 'oke siap' kalau kamu mengerti."
+            "content": f"Untuk percakapan ini kamu berperan sebagai karakter ini dan WAJIB ikuti semua instruksinya:\n\n{system}\n\nBalas 'oke siap' kalau mengerti."
         })
-        result.append({
-            "role": "assistant",
-            "content": "oke siap"
-        })
-
+        result.append({"role": "assistant", "content": "oke siap"})
     result.extend(messages)
     return result
 
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.json
-    system  = data.get('system', '')
+    system   = data.get('system', '')
     messages = data.get('messages', [])
-
     full_messages = build_messages(system, messages)
 
     last_error = None
-    for provider, model in PROVIDERS_TO_TRY:
+    for provider, name in PROVIDERS:
         try:
             response = g4f.ChatCompletion.create(
-                model=model,
+                model=g4f.models.default,
                 messages=full_messages,
                 provider=provider,
             )
-            if response and len(str(response).strip()) > 1:
-                print(f"✅ Provider berhasil: {provider.__name__}", flush=True)
-                return jsonify({"reply": str(response), "model": model, "provider": provider.__name__})
+            reply = str(response).strip()
+            if reply and len(reply) > 2 and reply != "oke siap":
+                print(f"✅ {name} berhasil", flush=True)
+                return jsonify({"reply": reply, "provider": name})
+            print(f"⚠️  {name} return kosong/pendek", flush=True)
         except Exception as e:
             last_error = str(e)
-            print(f"⚠️  {provider.__name__} gagal: {e}", flush=True)
+            print(f"⚠️  {name} gagal: {e}", flush=True)
             continue
 
     return jsonify({"error": last_error or "semua provider gagal"}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok"})
+    providers = [n for _, n in PROVIDERS]
+    return jsonify({"status": "ok", "providers": providers})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
